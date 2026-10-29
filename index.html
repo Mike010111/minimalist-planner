@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Discipline</title>
+<meta name="description" content="Минималистичная очередь задач">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Discipline">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="format-detection" content="telephone=no">
+<meta name="theme-color" content="#F3F3EF" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0B0B0C" media="(prefers-color-scheme: dark)">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="icon" type="image/png" href="icons/favicon.png">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<div id="app">
+
+  <section class="screen is-active" id="queueScreen" data-screen="queue">
+    <header class="head">
+      <div class="head-left">
+        <div class="eyebrow" id="todayWd"></div>
+        <div class="big-day" id="todayNum"></div>
+        <div class="mon-name" id="todayMon"></div>
+      </div>
+      <div class="cal" id="calMain" aria-label="Календарь"></div>
+    </header>
+    <div class="scroller" id="queueScroll">
+      <ul class="list" id="queue"></ul>
+      <p class="empty" id="queueEmpty">Очередь пуста</p>
+    </div>
+  </section>
+
+  <section class="screen" id="doneScreen" data-screen="done" aria-hidden="true">
+    <header class="head">
+      <div class="head-left">
+        <div class="eyebrow">Выполнено</div>
+        <div class="range-title" id="rangeTitle"></div>
+        <div class="sub" id="rangeSub"></div>
+      </div>
+      <div class="cal" id="calDone" aria-label="Календарь периода"></div>
+    </header>
+    <div class="scroller" id="doneScroll">
+      <ul class="list" id="done"></ul>
+      <p class="empty" id="doneEmpty">Пусто за&nbsp;этот период</p>
+    </div>
+  </section>
+
+  <nav class="dock">
+    <div class="seg" role="tablist">
+      <span class="seg-pill" aria-hidden="true"></span>
+      <button class="seg-btn is-active" data-tab="queue" role="tab">Очередь<span class="seg-count" id="queueCount"></span></button>
+      <button class="seg-btn" data-tab="done" role="tab">Готово</button>
+    </div>
+    <button class="fab" id="fab" aria-label="Добавить задачу">
+      <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+    </button>
+  </nav>
+</div>
+
+<div class="scrim" id="scrim" hidden></div>
+<div class="sheet" id="sheet" hidden role="dialog" aria-label="Задача">
+  <div class="sheet-inner" id="sheetInner">
+    <textarea class="s-title" id="sTitle" rows="1" placeholder="Что нужно сделать?" enterkeyhint="done" autocomplete="off" autocapitalize="sentences"></textarea>
+
+    <div class="s-row s-dl" id="sDl">
+      <svg class="ic" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+      <span class="s-dl-text" id="sDlText">Срок</span>
+      <span class="s-dl-left" id="sDlLeft"></span>
+      <input type="datetime-local" class="s-dl-input" id="sDlInput" aria-label="Время завершения">
+      <button class="s-clear" id="sDlClear" aria-label="Убрать срок"><svg viewBox="0 0 24 24"><path d="M7 7l10 10M17 7L7 17"/></svg></button>
+    </div>
+
+    <div class="s-row s-rem" id="sRem">
+      <svg class="ic" viewBox="0 0 24 24"><path d="M6 16V11a6 6 0 1 1 12 0v5l1.5 2h-15z"/><path d="M10 20.5a2.2 2.2 0 0 0 4 0"/></svg>
+      <div class="chips" id="sChips">
+        <span class="chip-input-wrap" id="sRemWrap" hidden><input class="chip-input" id="sRemInput" inputmode="numeric" pattern="[0-9]*" enterkeyhint="done" autocomplete="off"><span>мин</span></span>
+        <button class="chip chip-add" id="sRemAdd" aria-label="Добавить напоминание"><svg viewBox="0 0 24 24"><path d="M12 6v12M6 12h12"/></svg></button>
+      </div>
+    </div>
+
+    <div class="s-info" id="sInfo"></div>
+
+    <div class="s-foot" id="sFoot">
+      <button class="s-link" id="sRestore">Вернуть в&nbsp;очередь</button>
+      <button class="s-link danger" id="sDelete">Удалить</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast" hidden role="status" aria-live="polite">
+  <img src="icons/apple-touch-icon.png" alt="" class="toast-icon">
+  <div class="toast-text">
+    <div class="toast-title" id="toastTitle"></div>
+    <div class="toast-body" id="toastBody"></div>
+  </div>
+</div>
+
+<label class="haptic" aria-hidden="true"><input type="checkbox" switch tabindex="-1"></label>
+
+<script src="config.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
