@@ -155,6 +155,11 @@ function promote() {
 }
 
 /* ───────────────────────── input binding (touch + mouse) ───────────────────────── */
+/* выделять текст можно только в полях ввода — иначе долгое нажатие выделяет страницу */
+const inField = n => { const el = n && (n.nodeType === 1 ? n : n.parentElement); return !!(el && el.closest('input, textarea')); };
+document.addEventListener('selectstart', e => { if (!inField(e.target)) e.preventDefault(); });
+document.addEventListener('contextmenu', e => { if (!inField(e.target)) e.preventDefault(); });
+
 let lastTouch = 0;
 function bindPress(el, h) {
   el.addEventListener('touchstart', e => {
@@ -206,45 +211,40 @@ class Calendar {
     this.cells = this.grid.children;
     this.marks = new Map(); // ключ → классы, чтобы обновлять только изменившиеся ячейки
     this.refresh();
-    this.month = null; this.touched = false; this.tw = 0;
+    this.month = null; this.touched = false;
     this.vp.addEventListener('scroll', () => this.onScroll(), { passive: true });
     for (const ev of ['touchstart', 'wheel', 'mousedown'])
-      this.vp.addEventListener(ev, () => { this.touched = true; this.stopTween(); }, { passive: true });
-    this.home(true);
+      this.vp.addEventListener(ev, () => { this.touched = true; this.stopAnim(); }, { passive: true });
+    this.home(false); // при запуске — сразу на месте, без движения
     // если при запуске раскладка была не готова — тихо поправить позицию
-    const fix = () => { if (!this.touched && !this.tw && Math.abs(this.vp.scrollTop - this.topOf(monthIdx(new Date()))) > 2) this.home(false); };
+    const fix = () => { if (!this.touched && Math.abs(this.vp.scrollTop - this.topOf(monthIdx(new Date()))) > 2) this.home(false); };
     addEventListener('load', fix); addEventListener('pageshow', fix); setTimeout(fix, 350);
   }
   get row() { return this._row || (this._row = this.cells[0].offsetHeight) || 24; }
   topOf(mi) { return Math.round((mondayOf(new Date(Math.floor(mi / 12), mi % 12, 1)) - this.origin) / 6048e5) * this.row; }
-  /* текущий месяц: неделя с 1-м числом — первой строкой; при запуске — лёгкая «доводка» на одну строку */
-  home(settle) { this.goto(monthIdx(new Date()), settle ? 'settle' : false); }
-  goto(mi, mode) {
-    const y = this.topOf(mi);
+  /* текущий месяц: неделя с 1-м числом — первой строкой */
+  home(animate) { this.goto(monthIdx(new Date()), animate); }
+  /* Анимация перехода — сдвигом сетки (transform на видеокарте), а не покадровой прокруткой:
+     позиция прокрутки меняется сразу, а сетка плавно «доезжает» от прежнего вида. */
+  goto(mi, animate) {
+    const y = this.topOf(mi), vp = this.vp, old = vp.scrollTop;
+    this.stopAnim();
     this.setMonth(mi);
-    this.stopTween();
-    const vp = this.vp;
-    if (!mode || REDUCED) { vp.scrollTop = y; return; }
-    let from = mode === 'settle' ? y + this.row : vp.scrollTop;
-    const lim = this.row * 8; // издалека не «прокручиваем» годы — подъезжаем с короткой дистанции
-    if (Math.abs(y - from) > lim) from = y - Math.sign(y - from) * lim;
-    vp.classList.add('nosnap');
-    vp.scrollTop = from;
-    const t0 = performance.now(), D = mode === 'settle' ? 560 : 460;
-    const step = t => {
-      const p = Math.min(1, (t - t0) / D), e = 1 - Math.pow(1 - p, 3);
-      vp.scrollTop = from + (y - from) * e;
-      if (p < 1) this.tw = requestAnimationFrame(step);
-      else { this.tw = 0; vp.classList.remove('nosnap'); }
-    };
-    this.tw = requestAnimationFrame(step);
+    vp.scrollTop = y;
+    const delta = y - old;
+    if (!animate || REDUCED || Math.abs(delta) < 1) return;
+    const lim = vp.clientHeight * 0.75, far = Math.abs(delta) > lim;
+    const d = clamp(delta, -lim, lim);
+    this.anim = this.grid.animate(
+      far ? [{ transform: `translate3d(0,${d}px,0)`, opacity: 0 }, { opacity: 1, offset: 0.55 }, { transform: 'none', opacity: 1 }]
+          : [{ transform: `translate3d(0,${d}px,0)` }, { transform: 'none' }],
+      { duration: far ? 420 : 380, easing: 'cubic-bezier(.22,.8,.22,1)' });
   }
-  stopTween() { if (this.tw) { cancelAnimationFrame(this.tw); this.tw = 0; this.vp.classList.remove('nosnap'); } }
+  stopAnim() { if (this.anim) { this.anim.cancel(); this.anim = null; } }
   onScroll() {
     if (this.raf) return;
     this.raf = requestAnimationFrame(() => {
       this.raf = 0;
-      if (this.tw) return; // во время своей анимации месяц уже выставлен
       const w = Math.floor((this.vp.scrollTop + this.vp.clientHeight / 2) / this.row);
       const d = new Date(this.origin); d.setDate(d.getDate() + w * 7 + 3); // четверг строки в центре
       const mi = monthIdx(d);
@@ -310,7 +310,7 @@ function selectDay(k) {
   if (!REDUCED) queueEl.animate([{ opacity: 0, transform: 'translateY(8px)' }, { opacity: 1, transform: 'none' }], { duration: 280, easing: EASE });
   calMain.refresh();
 }
-$('#planToday').addEventListener('click', () => { selectDay(null); calMain.home(false); haptic(); });
+$('#planToday').addEventListener('click', () => { selectDay(null); calMain.home(true); haptic(); });
 
 /* ───────────────────────── queue rendering ───────────────────────── */
 const queueEl = $('#queue'), queueScroll = $('#queueScroll');
@@ -984,6 +984,7 @@ const Menu = {
   openFor(row) {
     const t = store.queue.find(x => x.id === row.dataset.id);
     if (!t) return;
+    try { getSelection().removeAllRanges(); } catch (_) {}
     this.open = true; this.held = true; this.row = row; this.task = t; this.edit = null;
     haptic();
     const card = this.card = $('.card', row), r = card.getBoundingClientRect();
@@ -1389,7 +1390,7 @@ const calMain = new Calendar($('#calMain'), {
   $('#calMain').addEventListener('click', e => {
     const t = now();
     if (t - last < 320 && Math.hypot(e.clientX - lx, e.clientY - ly) < 40) {
-      last = 0; selectDay(null); calMain.home(false); haptic(); return;
+      last = 0; selectDay(null); calMain.home(true); haptic(); return;
     }
     last = t; lx = e.clientX; ly = e.clientY;
     const d = e.target.closest('.d'); if (!d) return;
@@ -1433,7 +1434,7 @@ const calDone = new Calendar($('#calDone'), {
       el.classList.remove('holding');
       suppress = true; setTimeout(() => (suppress = false), 600);
       resetRange();
-      calDone.refresh(); calDone.home(false);
+      calDone.refresh(); calDone.home(true);
       el.classList.remove('pulse'); void el.offsetWidth; el.classList.add('pulse');
       haptic();
       renderDone(true);
