@@ -29,6 +29,10 @@
       </div>
       <div class="cal" id="calMain" aria-label="Календарь"></div>
     </header>
+    <div class="planbar" id="planBar" hidden>
+      <span class="pb-text" id="planText"></span>
+      <button class="pb-today" id="planToday">Сегодня</button>
+    </div>
     <div class="scroller" id="queueScroll">
       <ul class="list" id="queue"></ul>
       <p class="empty" id="queueEmpty">Очередь пуста</p>
@@ -54,7 +58,7 @@
     <div class="seg" role="tablist">
       <span class="seg-pill" aria-hidden="true"></span>
       <button class="seg-btn is-active" data-tab="queue" role="tab">Очередь<span class="seg-count" id="queueCount"></span></button>
-      <button class="seg-btn" data-tab="done" role="tab">Готово</button>
+      <button class="seg-btn" data-tab="done" role="tab">Выполнено</button>
     </div>
     <button class="fab" id="fab" aria-label="Добавить задачу">
       <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
@@ -66,6 +70,12 @@
 <div class="sheet" id="sheet" hidden role="dialog" aria-label="Задача">
   <div class="sheet-inner" id="sheetInner">
     <textarea class="s-title" id="sTitle" rows="1" placeholder="Что нужно сделать?" enterkeyhint="done" autocomplete="off" autocapitalize="sentences"></textarea>
+
+    <div class="s-row s-day" id="sDay" hidden>
+      <svg class="ic" viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="15.5" rx="3"/><path d="M3.5 10h17M8 3v4M16 3v4"/></svg>
+      <span class="s-day-text" id="sDayText"></span>
+      <input type="date" class="s-dl-input" id="sDayInput" aria-label="День">
+    </div>
 
     <div class="s-row s-dl" id="sDl">
       <svg class="ic" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
@@ -89,6 +99,26 @@
       <button class="s-link" id="sRestore">Вернуть в&nbsp;очередь</button>
       <button class="s-link danger" id="sDelete">Удалить</button>
     </div>
+  </div>
+</div>
+
+<div class="mscrim" id="mScrim" hidden></div>
+<div class="menu" id="menu" hidden role="menu" aria-label="Действия с задачей">
+  <button class="mi" id="miStart"></button>
+  <label class="mi">
+    <svg viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="15.5" rx="3"/><path d="M3.5 10h17M8 3v4M16 3v4"/></svg>
+    <span class="mi-t">Перенести</span><span class="mi-s" id="miDateS"></span>
+    <input type="date" class="mi-date" id="miDate" aria-label="Перенести на день">
+  </label>
+  <div class="m-sep"></div>
+  <div class="m-tags" id="mTags"></div>
+  <div class="m-tagedit" id="mTagEdit" hidden>
+    <div class="te-row">
+      <button class="te-btn te-del" id="teDel" aria-label="Удалить тег"><svg viewBox="0 0 24 24"><path d="M5 7h14M10 7V5h4v2M7 7l1 12.5h8L17 7"/></svg></button>
+      <input class="te-name" id="teName" placeholder="Название тега" maxlength="24" enterkeyhint="done" autocomplete="off" autocapitalize="sentences">
+      <button class="te-btn te-ok" id="teOk" aria-label="Готово"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></button>
+    </div>
+    <div class="te-colors" id="teColors"></div>
   </div>
 </div>
 

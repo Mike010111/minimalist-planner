@@ -1,5 +1,5 @@
 /* Discipline service worker: офлайн-кэш + push-уведомления */
-const CACHE = 'discipline-v4';
+const CACHE = 'discipline-v5';
 const SHELL = ['./', 'index.html', 'app.css', 'app.js', 'config.js', 'manifest.webmanifest',
   'icons/apple-touch-icon.png', 'icons/icon-192.png', 'icons/icon-512.png', 'icons/favicon.png'];
 

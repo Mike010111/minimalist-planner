@@ -68,6 +68,18 @@ function fmtWhenLong(ts) {
 }
 /* дата-время; если сегодня — только время */
 function fmtDT(ts) { return dayDiff(ts, now()) === 0 ? hm(ts) : `${dateShort(ts)},${NB}${hm(ts)}`; }
+const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+/* «Пн, 2 ноября» */
+function fmtDay(k) {
+  const d = fromKey(k), y = new Date().getFullYear();
+  return `${WD_SH[d.getDay()]},${NB}${d.getDate()}${NB}${MON_GEN[d.getMonth()]}` + (d.getFullYear() !== y ? `${NB}${d.getFullYear()}` : '');
+}
+/* «завтра» / «через 3 дня» */
+function fmtIn(k) {
+  const n = dayDiff(fromKey(k), now());
+  return n === 1 ? 'завтра' : `через${NB}${n}${NB}${plural(n, 'день', 'дня', 'дней')}`;
+}
 function fmtStamp(ts) { const d = new Date(ts); return `${WD_SH[d.getDay()]},${NB}${dateShort(ts)},${NB}${hm(ts)}`; }
 function toInputValue(ts) { const d = new Date(ts); return `${keyOf(d)}T${hm(ts)}`; }
 
@@ -85,22 +97,62 @@ const ICON = {
   play: '<svg viewBox="0 0 24 24"><path d="M8 5.5v13l10.5-6.5z"/></svg>',
   timer: '<svg viewBox="0 0 24 24"><circle cx="12" cy="13" r="8"/><path d="M12 9v4M9.5 2.5h5"/></svg>',
   x: '<svg viewBox="0 0 24 24"><path d="M7 7l10 10M17 7L7 17"/></svg>',
+  stop: '<svg viewBox="0 0 24 24"><rect x="6.5" y="6.5" width="11" height="11" rx="2.5"/></svg>',
+  cal: '<svg viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="15.5" rx="3"/><path d="M3.5 10h17M8 3v4M16 3v4"/></svg>',
+  plus: '<svg viewBox="0 0 24 24"><path d="M12 6v12M6 12h12"/></svg>',
+  trash: '<svg viewBox="0 0 24 24"><path d="M5 7h14M10 7V5h4v2M7 7l1 12.5h8L17 7"/></svg>',
 };
 
 /* ───────────────────────── store ───────────────────────── */
+/*
+ * Задача: { id, title, deadline, startedAt, startAuto, reminders, createdAt, doneAt, day, tag }
+ *   day       — ключ дня 'YYYY-MM-DD' для задач, запланированных на будущий день (иначе null)
+ *   startAuto — начало выставлено автоматически (первым сроком), а не вручную из меню
+ */
 const KEY = 'discipline.v1';
-const store = { queue: [], done: [] };
+const store = { queue: [], done: [], tags: [] };
 function load() {
   try {
     const s = JSON.parse(localStorage.getItem(KEY));
-    if (s) { store.queue = s.queue || []; store.done = s.done || []; }
+    if (s) { store.queue = s.queue || []; store.done = s.done || []; store.tags = s.tags || []; }
   } catch (_) {}
+  for (const t of [...store.queue, ...store.done]) {
+    if (t.day === undefined) t.day = null;
+    if (t.tag === undefined) t.tag = null;
+    if (t.startAuto === undefined) t.startAuto = !!(t.startedAt && t.deadline);
+  }
 }
 function save() {
   try { localStorage.setItem(KEY, JSON.stringify(store)); } catch (_) {}
   Notify.schedule();
 }
 const findTask = id => store.queue.find(t => t.id === id) || store.done.find(t => t.id === id);
+const tagOf = t => (t && t.tag && store.tags.find(g => g.id === t.tag)) || null;
+const isPlanned = t => !!(t.day && t.day > todayKey);
+
+/*
+ * Начало задачи — единые правила:
+ *  • срок выставлен впервые → задача начата сейчас (только сегодняшняя, невыполненная, ещё не начатая);
+ *  • срок изменён → начало не меняется;
+ *  • срок убран → автоматическое начало сбрасывается, ручное («Начать» в меню) остаётся;
+ *  • «Начать» / «Отменить начало» в меню (удержание карточки) — вручную;
+ *  • задачи на будущий день не бывают начатыми: «Начать» переносит задачу на сегодня;
+ *  • у выполненных задач правка срока историю (начало) не трогает.
+ */
+const Start = {
+  onDeadlineSet(t, had) { if (!had && !t.startedAt && !t.doneAt && !isPlanned(t)) { t.startedAt = now(); t.startAuto = true; } },
+  onDeadlineCleared(t) { if (!t.doneAt && t.startedAt && t.startAuto) { t.startedAt = null; t.startAuto = false; } },
+  begin(t) { t.startedAt = now(); t.startAuto = false; if (isPlanned(t)) t.day = null; },
+  cancel(t) { t.startedAt = null; t.startAuto = false; },
+};
+
+/* задачи будущего дня, чей день наступил, встают в конец сегодняшней очереди */
+function promote() {
+  const due = store.queue.filter(t => t.day && t.day <= todayKey);
+  if (!due.length) return false;
+  store.queue = store.queue.filter(t => !due.includes(t)).concat(due.map(t => (t.day = null, t)));
+  return true;
+}
 
 /* ───────────────────────── input binding (touch + mouse) ───────────────────────── */
 let lastTouch = 0;
@@ -126,48 +178,73 @@ function bindPress(el, h) {
 }
 
 /* ───────────────────────── calendar ───────────────────────── */
-/* Непрерывная лента недель (±10 лет). Активный месяц — тот, что в центре окна;
-   дни остальных месяцев приглушены. Недели дорисовываются лениво, пачками. */
+/* Непрерывная лента недель (−3…+5 лет), построенная сразу целиком — поэтому позиция
+   выставляется мгновенно и ничего не «прокручивается» при запуске. Привязка к строкам —
+   CSS scroll-snap; программная прокрутка — своей короткой анимацией (без нативного smooth). */
 const monthIdx = d => d.getFullYear() * 12 + d.getMonth();
 const mondayOf = d => { const x = new Date(d.getFullYear(), d.getMonth(), d.getDate()); x.setDate(x.getDate() - ((x.getDay() + 6) % 7)); return x; };
 class Calendar {
   constructor(root, opts) {
-    this.root = root; this.o = opts; this.CH = 8;
+    this.root = root; this.o = opts;
     const y = new Date().getFullYear();
-    this.origin = mondayOf(new Date(y - 10, 0, 1));
-    this.chunks = Math.ceil(this.weekIdx(new Date(y + 11, 0, 1)) / this.CH);
+    this.origin = mondayOf(new Date(y - 3, 0, 1));
+    this.weeks = Math.round((mondayOf(new Date(y + 6, 0, 1)) - this.origin) / 6048e5);
     root.innerHTML =
       '<div class="cal-head"><span class="cal-label"></span></div>' +
       '<div class="cal-wd">' + ['Пн','Вт','Ср','Чт','Пт','Сб','Вс'].map(w => `<span>${w}</span>`).join('') + '</div>' +
-      '<div class="cal-vp"><div class="cal-track"></div></div><style></style>';
-    this.label = $('.cal-label', root); this.vp = $('.cal-vp', root); this.track = $('.cal-track', root);
+      '<div class="cal-vp"><div class="cal-grid"></div></div><style></style>';
+    this.label = $('.cal-label', root); this.vp = $('.cal-vp', root); this.grid = $('.cal-grid', root);
     this.css = $('style', root);
-    const frag = document.createDocumentFragment();
-    for (let c = 0; c < this.chunks; c++) {
-      const el = document.createElement('div'); el.className = 'cal-chunk'; el.dataset.c = c; frag.appendChild(el);
+    const d = new Date(this.origin);
+    let h = '';
+    for (let i = 0; i < this.weeks * 7; i++) {
+      const yy = d.getFullYear(), mo = pad(d.getMonth() + 1);
+      h += `<span class="d c${i % 7}" data-k="${yy}-${mo}-${pad(d.getDate())}" data-m="${yy}-${mo}"><b>${d.getDate()}</b></span>`;
+      d.setDate(d.getDate() + 1);
     }
-    this.track.appendChild(frag);
-    this.io = new IntersectionObserver(es => es.forEach(e => e.isIntersecting && this.fill(e.target)),
-      { root: this.vp, rootMargin: '200% 0px' });
-    for (const el of this.track.children) this.io.observe(el);
+    this.grid.innerHTML = h;
+    this.cells = this.grid.children;
+    this.marks = new Map(); // ключ → классы, чтобы обновлять только изменившиеся ячейки
+    this.refresh();
+    this.month = null; this.touched = false; this.tw = 0;
     this.vp.addEventListener('scroll', () => this.onScroll(), { passive: true });
-    this.month = null;
-    requestAnimationFrame(() => this.goto(monthIdx(new Date()), false));
+    for (const ev of ['touchstart', 'wheel', 'mousedown'])
+      this.vp.addEventListener(ev, () => { this.touched = true; this.stopTween(); }, { passive: true });
+    this.home(true);
+    // если при запуске раскладка была не готова — тихо поправить позицию
+    const fix = () => { if (!this.touched && !this.tw && Math.abs(this.vp.scrollTop - this.topOf(monthIdx(new Date()))) > 2) this.home(false); };
+    addEventListener('load', fix); addEventListener('pageshow', fix); setTimeout(fix, 350);
   }
-  get row() { return this._row || (this._row = this.vp.clientHeight / 6 || 24); }
-  weekIdx(d) { return Math.round((mondayOf(d) - this.origin) / 864e5 / 7); }
-  /* показать месяц: неделя с 1-м числом — первой строкой */
-  goto(mi, smooth) {
-    const w = this.weekIdx(new Date(Math.floor(mi / 12), mi % 12, 1));
-    const c = Math.floor(w / this.CH);
-    for (let i = c - 1; i <= c + 1; i++) this.fill(this.track.children[i]);
-    this.vp.scrollTo({ top: w * this.row, behavior: smooth && !REDUCED ? 'smooth' : 'auto' });
+  get row() { return this._row || (this._row = this.cells[0].offsetHeight) || 24; }
+  topOf(mi) { return Math.round((mondayOf(new Date(Math.floor(mi / 12), mi % 12, 1)) - this.origin) / 6048e5) * this.row; }
+  /* текущий месяц: неделя с 1-м числом — первой строкой; при запуске — лёгкая «доводка» на одну строку */
+  home(settle) { this.goto(monthIdx(new Date()), settle ? 'settle' : false); }
+  goto(mi, mode) {
+    const y = this.topOf(mi);
     this.setMonth(mi);
+    this.stopTween();
+    const vp = this.vp;
+    if (!mode || REDUCED) { vp.scrollTop = y; return; }
+    let from = mode === 'settle' ? y + this.row : vp.scrollTop;
+    const lim = this.row * 8; // издалека не «прокручиваем» годы — подъезжаем с короткой дистанции
+    if (Math.abs(y - from) > lim) from = y - Math.sign(y - from) * lim;
+    vp.classList.add('nosnap');
+    vp.scrollTop = from;
+    const t0 = performance.now(), D = mode === 'settle' ? 560 : 460;
+    const step = t => {
+      const p = Math.min(1, (t - t0) / D), e = 1 - Math.pow(1 - p, 3);
+      vp.scrollTop = from + (y - from) * e;
+      if (p < 1) this.tw = requestAnimationFrame(step);
+      else { this.tw = 0; vp.classList.remove('nosnap'); }
+    };
+    this.tw = requestAnimationFrame(step);
   }
+  stopTween() { if (this.tw) { cancelAnimationFrame(this.tw); this.tw = 0; this.vp.classList.remove('nosnap'); } }
   onScroll() {
     if (this.raf) return;
     this.raf = requestAnimationFrame(() => {
       this.raf = 0;
+      if (this.tw) return; // во время своей анимации месяц уже выставлен
       const w = Math.floor((this.vp.scrollTop + this.vp.clientHeight / 2) / this.row);
       const d = new Date(this.origin); d.setDate(d.getDate() + w * 7 + 3); // четверг строки в центре
       const mi = monthIdx(d);
@@ -175,57 +252,81 @@ class Calendar {
     });
   }
   setMonth(mi) {
-    const dir = this.month == null ? 0 : Math.sign(mi - this.month);
     if (mi === this.month) return;
+    const dir = this.month == null ? 0 : Math.sign(mi - this.month);
     this.month = mi;
     const y = Math.floor(mi / 12), m = mi % 12, key = `${y}-${pad(m + 1)}`, id = '#' + this.root.id;
     this.label.innerHTML = `${MON_NOM[m]}<span class="y">${y}</span>`;
     this.css.textContent =
-      `${id} .d:not([data-m="${key}"]):not(.rs):not(.re) b{color:var(--faint)}` +
-      `${id} .d.today:not([data-m="${key}"]) b{opacity:.55}`;
+      `${id} .d:not([data-m="${key}"]):not(.today):not(.sel):not(.rs):not(.re) b{color:var(--cal-out)}` +
+      `${id} .d.today:not([data-m="${key}"]) b{opacity:.5}`;
     if (dir && !REDUCED) this.label.animate(
       [{ transform: `translateY(${dir * 8}px)`, opacity: 0 }, { transform: 'none', opacity: 1 }],
       { duration: 220, easing: EASE });
   }
-  fill(el) {
-    if (!el || el.dataset.f) return;
-    el.dataset.f = '1';
-    const c = +el.dataset.c;
-    const d = new Date(this.origin); d.setDate(d.getDate() + c * this.CH * 7);
-    let h = '';
-    for (let i = 0; i < this.CH * 7; i++) {
-      const y = d.getFullYear(), mo = pad(d.getMonth() + 1);
-      h += `<span class="d c${i % 7}" data-k="${y}-${mo}-${pad(d.getDate())}" data-m="${y}-${mo}"><b>${d.getDate()}</b></span>`;
-      d.setDate(d.getDate() + 1);
+  refresh() {
+    const next = new Map();
+    for (const k of this.o.keys()) { const c = this.o.mark(k); if (c) next.set(k, c); }
+    const touched = new Set([...this.marks.keys(), ...next.keys()]);
+    for (const k of touched) {
+      const c = next.get(k) || '';
+      if (c === (this.marks.get(k) || '')) continue;
+      const cell = this.cellOf(k);
+      if (cell) cell.className = cell.className.replace(/\s(today|sel|dot|in|rs|re|pend)\b/g, '') + c;
     }
-    el.innerHTML = h;
-    this.deco(el);
+    this.marks = next;
   }
-  deco(el) {
-    for (const c of el.children) {
-      const extra = this.o.mark(c.dataset.k);
-      c.className = c.className.replace(/\s(today|in|rs|re|pend)\b/g, '') + extra;
-    }
+  cellOf(k) {
+    const i = Math.round((fromKey(k) - this.origin) / 864e5);
+    return i >= 0 && i < this.cells.length ? this.cells[i] : null;
   }
-  refresh() { this.track.querySelectorAll('.cal-chunk[data-f]').forEach(el => this.deco(el)); }
 }
 
-/* ───────────────────────── header / today ───────────────────────── */
+/* ───────────────────────── header / today / выбранный день ───────────────────────── */
 let todayKey = keyOf(new Date());
+const view = { day: null }; // null — сегодняшняя очередь; 'YYYY-MM-DD' — план на будущий день
 function renderToday() {
   const d = new Date();
   $('#todayWd').textContent = WD[d.getDay()];
   $('#todayNum').textContent = d.getDate();
   $('#todayMon').textContent = MON_GEN[d.getMonth()];
 }
+const planBar = $('#planBar');
+function renderPlanBar(animate) {
+  const on = !!view.day, was = !planBar.hidden;
+  if (on) $('#planText').innerHTML = `<b>${fmtDay(view.day)}</b><span>${NB}·${NB}${fmtIn(view.day)}</span>`;
+  if (on === was) return;
+  planBar.hidden = !on;
+  if (!animate || REDUCED) return;
+  if (on) planBar.animate([{ opacity: 0, transform: 'translateY(-6px) scale(.98)' }, { opacity: 1, transform: 'none' }], { duration: 300, easing: EASE });
+}
+function selectDay(k) {
+  if (k === todayKey) k = null;
+  if (k === view.day) return;
+  view.day = k;
+  renderPlanBar(true);
+  renderQueue();
+  queueScroll.scrollTop = 0;
+  if (!REDUCED) queueEl.animate([{ opacity: 0, transform: 'translateY(8px)' }, { opacity: 1, transform: 'none' }], { duration: 280, easing: EASE });
+  calMain.refresh();
+}
+$('#planToday').addEventListener('click', () => { selectDay(null); calMain.home(false); haptic(); });
 
 /* ───────────────────────── queue rendering ───────────────────────── */
 const queueEl = $('#queue'), queueScroll = $('#queueScroll');
 const rowMap = new Map();
 const ui = { busy: false, drag: null };
+const inView = t => (view.day ? t.day === view.day : !isPlanned(t));
+const visibleTasks = () => store.queue.filter(inView);
+let plannedDays = new Set();
 
+function tagHTML(t) {
+  const g = tagOf(t);
+  return g ? `<span class="tag" style="--tc:${g.color}">${esc(g.name)}</span>` : '';
+}
 function metaHTML(t) {
-  let h = t.startedAt ? `<span class="m start">${ICON.play}${fmtDT(t.startedAt)}</span>` : '';
+  let h = tagHTML(t);
+  if (t.startedAt) h += `<span class="m start">${ICON.play}${fmtDT(t.startedAt)}</span>`;
   if (!t.deadline) return h;
   const left = t.deadline - now();
   const cls = left <= 0 ? 'over' : left < 36e5 ? 'soon' : '';
@@ -249,32 +350,50 @@ function fillRow(row, t) {
   if (meta.innerHTML !== mh) meta.innerHTML = mh;
 }
 function renderQueue() {
-  const ids = new Set(store.queue.map(t => t.id));
+  const vis = visibleTasks(), ids = new Set(vis.map(t => t.id));
   for (const [id, row] of rowMap) if (!ids.has(id)) { row.remove(); rowMap.delete(id); }
-  store.queue.forEach((t, i) => {
+  vis.forEach((t, i) => {
     let row = rowMap.get(t.id);
     if (!row) { row = makeRow(t); rowMap.set(t.id, row); }
     fillRow(row, t);
     if (queueEl.children[i] !== row) queueEl.insertBefore(row, queueEl.children[i] || null);
   });
-  $('#queueEmpty').hidden = store.queue.length > 0;
-  $('#queueCount').textContent = store.queue.length || '';
+  queueEl.classList.toggle('plan', !!view.day);
+  const empty = $('#queueEmpty');
+  empty.hidden = vis.length > 0;
+  empty.textContent = view.day ? 'На этот день пока пусто' : 'Очередь пуста';
+  const todayCount = store.queue.filter(t => !isPlanned(t)).length;
+  $('#queueCount').textContent = todayCount || '';
+  const pd = new Set(store.queue.filter(isPlanned).map(t => t.day));
+  if ([...pd].sort().join() !== [...plannedDays].sort().join()) { plannedDays = pd; calMain.refresh(); }
+}
+/* новый порядок видимого списка записывается в те же позиции общей очереди */
+function reorderVisible(f, to) {
+  const vis = visibleTasks(), slots = vis.map(t => store.queue.indexOf(t));
+  const [m] = vis.splice(f, 1); vis.splice(to, 0, m);
+  slots.forEach((qi, k) => { store.queue[qi] = vis[k]; });
 }
 
-/* ───────────────────────── gestures: tap / swipe / drag ───────────────────────── */
+/* ───────────────────────── gestures: tap / swipe / hold / drag ───────────────────────── */
+/* Удержание ~0,4 с → карточка приподнимается и открывается меню. Если, не отпуская,
+   повести палец — меню закрывается и карточка перетаскивается (как на домашнем экране iOS). */
 function rowGestures(row) {
   const card = $('.card', row);
   let g = null;
   bindPress(card, {
     down(x, y) {
-      if (ui.busy || ui.drag || Editor.open) return;
+      if (ui.busy || ui.drag || Editor.open || Menu.open) return;
       g = { x0: x, y0: y, x, y, t0: performance.now(), mode: null, trail: [[x, performance.now()]] };
-      g.lp = setTimeout(() => { if (g && !g.mode) { g.mode = 'drag'; dragStart(row, g); } }, 380);
+      g.lp = setTimeout(() => { if (g && !g.mode) { g.mode = 'hold'; Menu.openFor(row); } }, 420);
     },
     move(x, y) {
       if (!g) return false;
       g.x = x; g.y = y;
       const dx = x - g.x0, dy = y - g.y0;
+      if (g.mode === 'hold') {
+        if (Math.hypot(dx, dy) > 10) { Menu.toDrag(); g.mode = 'drag'; dragStart(row, g); }
+        return true;
+      }
       if (g.mode === 'drag') { dragMove(y); return true; }
       if (!g.mode && (Math.abs(dx) > 8 || Math.abs(dy) > 8)) {
         clearTimeout(g.lp);
@@ -282,14 +401,8 @@ function rowGestures(row) {
         if (g.mode === 'swipe') { row.classList.add('swiping'); g.sx = x - Math.sign(dx) * 8; }
       }
       if (g.mode === 'swipe') {
-        if (g.shaken) return true;
         const t = performance.now();
         g.trail.push([x, t]); while (g.trail.length > 2 && t - g.trail[0][1] > 90) g.trail.shift();
-        if (trackShake(g, x - g.x0, row)) {
-          g.shaken = true;
-          shakeToggle(row);
-          return true;
-        }
         swipeMove(row, x - g.sx);
         return true;
       }
@@ -299,13 +412,11 @@ function rowGestures(row) {
       if (!g) return;
       clearTimeout(g.lp);
       const m = g.mode;
-      if (m === 'drag') dragEnd();
+      if (m === 'hold') { if (e && e.cancelable && e.type === 'touchend') e.preventDefault(); Menu.release(); }
+      else if (m === 'drag') dragEnd();
       else if (m === 'swipe') {
-        if (g.shaken) { g = null; return; }
         const [px, pt] = g.trail[0];
-        // после встряхивания «вполсилы» не засчитываем резкий рывок как смахивание
-        const v = g.sh && g.sh.n >= 2 ? 0 : (x - px) / Math.max(1, performance.now() - pt);
-        swipeEnd(row, x - g.sx, v);
+        swipeEnd(row, x - g.sx, (x - px) / Math.max(1, performance.now() - pt));
       } else if (!m && performance.now() - g.t0 < 500) {
         if (e && e.cancelable && e.type === 'touchend') e.preventDefault(); // без синтетического click
         const t = findTask(row.dataset.id);
@@ -316,7 +427,8 @@ function rowGestures(row) {
     cancel() {
       if (!g) return;
       clearTimeout(g.lp);
-      if (g.mode === 'drag') dragEnd();
+      if (g.mode === 'hold') Menu.release();
+      else if (g.mode === 'drag') dragEnd();
       else if (g.mode === 'swipe') swipeEnd(row, 0, 0);
       g = null;
     }
@@ -324,39 +436,6 @@ function rowGestures(row) {
 }
 
 const swipeThreshold = row => Math.min(120, row.offsetWidth * 0.3);
-
-/* Встряхивание: 4 движения подряд через исходную точку (→←→← или ←→←→):
-   каждый раз палец уходит на другую сторону минимум на 14 px, но не дальше ~70% порога
-   смахивания, и всё укладывается в 1,6 с. Простое «покачивание» с возвратом в центр не считается. */
-function trackShake(g, dx, row) {
-  const STROKE = 14, MAX = swipeThreshold(row) * 0.7, T = performance.now();
-  const sh = g.sh || (g.sh = { side: 0, n: 0, t0: T, dead: false });
-  if (sh.dead) return false;
-  if (Math.abs(dx) > MAX || (sh.n && T - sh.t0 > 1600)) { sh.dead = true; return false; }
-  if (Math.abs(dx) >= STROKE && Math.sign(dx) !== sh.side) {
-    if (!sh.n) sh.t0 = T;
-    sh.side = Math.sign(dx); sh.n++;
-  }
-  return sh.n >= 4;
-}
-/* начатая → не начатая; не начатая → начата сейчас */
-function shakeToggle(row) {
-  const t = store.queue.find(x => x.id === row.dataset.id);
-  if (!t) return;
-  t.startedAt = t.startedAt ? null : now();
-  haptic();
-  const card = $('.card', row), from = row._x || 0;
-  card.style.transform = '';
-  row.classList.remove('swiping');
-  resetActs(row); row._x = 0;
-  card.animate([{ transform: `translate3d(${from}px,0,0)` }, { transform: 'translate3d(-5px,0,0)' }, { transform: 'translate3d(3px,0,0)' }, { transform: 'none' }],
-    { duration: dur(420), easing: 'ease-out' });
-  fillRow(row, t);
-  const st = $('.m.start', row);
-  if (st && !REDUCED) st.animate([{ opacity: 0, transform: 'scale(.7)' }, { opacity: 1, transform: 'none' }], { duration: 320, easing: 'cubic-bezier(.2,1.3,.4,1)' });
-  else if (!st && !REDUCED) $('.c-meta', row).animate([{ opacity: .3 }, { opacity: 1 }], { duration: 260 });
-  save();
-}
 function swipeMove(row, dx) {
   const card = $('.card', row), th = swipeThreshold(row);
   // лёгкое сопротивление за порогом
@@ -482,7 +561,7 @@ async function dragEnd() {
   d.row.classList.remove('dragging');
   d.row.style.transform = `translate3d(0,${target - s[f].top}px,0)`;
   await wait(dur(250));
-  if (to !== f) { const [t] = store.queue.splice(f, 1); store.queue.splice(to, 0, t); }
+  if (to !== f) reorderVisible(f, to);
   queueEl.classList.remove('sorting');
   d.rows.forEach(r => { r.style.transform = ''; r.classList.remove('settling'); });
   queueScroll.classList.remove('lock');
@@ -501,6 +580,7 @@ function currentWeek() {
 }
 function resetRange() { Object.assign(range, currentWeek(), { pending: null }); }
 function activeRange() { return range.pending ? { start: range.pending, end: range.pending } : range; }
+resetRange();
 
 const nw = s => `<span class="nw">${s}</span>`;
 function rangeTitle() {
@@ -514,10 +594,10 @@ function rangeTitle() {
 }
 function doneMeta(t) {
   if (t.startedAt) {
-    return `<span class="m">${ICON.play}${fmtStamp(t.startedAt)}</span>` +
+    return tagHTML(t) + `<span class="m">${ICON.play}${fmtStamp(t.startedAt)}</span>` +
       `<span class="m strong">${ICON.timer}${fmtDur(Math.max(0, t.doneAt - t.startedAt))}</span>`;
   }
-  return `<span class="m">${ICON.check}${fmtStamp(t.doneAt)}</span>`;
+  return tagHTML(t) + `<span class="m">${ICON.check}${fmtStamp(t.doneAt)}</span>`;
 }
 function renderDone(animate) {
   const { start, end } = activeRange();
@@ -554,28 +634,68 @@ function renderDone(animate) {
   if (animate && !REDUCED) doneEl.animate([{ opacity: 0.2, transform: 'translateY(6px)' }, { opacity: 1, transform: 'none' }], { duration: 260, easing: EASE });
 }
 
-/* ───────────────────────── tabs ───────────────────────── */
+/* ───────────────────────── tabs (нажатие или проведение по переключателю) ───────────────────────── */
 let tab = 'queue';
+const appEl = $('#app'), seg = $('.seg'), segPill = $('.seg-pill'), fab = $('#fab');
+const screens = { queue: $('#queueScreen'), done: $('#doneScreen') };
 function setTab(t) {
-  if (t === tab) return;
+  appEl.classList.remove('tabdrag');
+  for (const el of [segPill, fab, screens.queue, screens.done]) { el.style.transform = ''; el.style.opacity = ''; }
   tab = t;
-  document.querySelectorAll('.screen').forEach(s => {
+  for (const s of Object.values(screens)) {
     const on = s.dataset.screen === t;
     s.classList.toggle('is-active', on); s.setAttribute('aria-hidden', on ? 'false' : 'true');
-  });
+  }
   document.querySelectorAll('.seg-btn').forEach(b => b.classList.toggle('is-active', b.dataset.tab === t));
-  $('.seg').classList.toggle('on-done', t === 'done');
+  seg.classList.toggle('on-done', t === 'done');
   $('.dock').classList.toggle('on-done', t === 'done');
   if (t === 'done') renderDone();
 }
-document.querySelectorAll('.seg-btn').forEach(b => b.addEventListener('click', () => setTab(b.dataset.tab)));
+/* p: 0 — «Очередь», 1 — «Выполнено»; экраны и «пилюля» следуют за пальцем */
+function tabProgress(p) {
+  segPill.style.transform = `translateX(${p * 100}%)`;
+  screens.queue.style.transform = `translateX(${-18 * p}%)`; screens.queue.style.opacity = 1 - p;
+  screens.done.style.transform = `translateX(${18 * (1 - p)}%)`; screens.done.style.opacity = p;
+  fab.style.transform = `scale(${1 - 0.6 * p})`; fab.style.opacity = 1 - p;
+  document.querySelectorAll('.seg-btn').forEach(b => b.classList.toggle('is-active', (b.dataset.tab === 'done') === (p >= 0.5)));
+}
+bindPress(seg, {
+  down(x) { if (Editor.open || Menu.open) return; this.s = { x0: x, p0: tab === 'done' ? 1 : 0, p: tab === 'done' ? 1 : 0, moved: false, trail: [[x, performance.now()]] }; },
+  move(x) {
+    const s = this.s; if (!s) return false;
+    const dx = x - s.x0;
+    if (!s.moved && Math.abs(dx) < 6) return true;
+    if (!s.moved) { s.moved = true; appEl.classList.add('tabdrag'); screens.done.style.visibility = ''; }
+    s.p = clamp(s.p0 + dx / segPill.offsetWidth, 0, 1);
+    const t = performance.now(); s.trail.push([x, t]); while (s.trail.length > 2 && t - s.trail[0][1] > 90) s.trail.shift();
+    tabProgress(s.p);
+    return true;
+  },
+  up(x, y, e) {
+    const s = this.s; this.s = null;
+    if (!s) return;
+    if (e && e.cancelable && e.type === 'touchend') e.preventDefault();
+    if (!s.moved) {
+      const r = seg.getBoundingClientRect();
+      const t = x < r.left + r.width / 2 ? 'queue' : 'done';
+      if (t !== tab) { haptic(); setTab(t); }
+      return;
+    }
+    const [px, pt] = s.trail[0], v = (x - px) / Math.max(1, performance.now() - pt);
+    const t = v > 0.35 ? 'done' : v < -0.35 ? 'queue' : s.p >= 0.5 ? 'done' : 'queue';
+    if (t !== tab) haptic();
+    setTab(t);
+  },
+  cancel() { if (this.s) { this.s = null; setTab(tab); } },
+});
 
 /* ───────────────────────── editor sheet ───────────────────────── */
 const sheet = $('#sheet'), inner = $('#sheetInner'), scrim = $('#scrim');
 const sTitle = $('#sTitle'), sDl = $('#sDl'), sDlText = $('#sDlText'), sDlLeft = $('#sDlLeft'),
   sDlInput = $('#sDlInput'), sDlClear = $('#sDlClear'), sRem = $('#sRem'), sChips = $('#sChips'),
   sRemAdd = $('#sRemAdd'), sRemWrap = $('#sRemWrap'), sRemInput = $('#sRemInput'),
-  sInfo = $('#sInfo'), sFoot = $('#sFoot'), sRestore = $('#sRestore'), sDelete = $('#sDelete');
+  sInfo = $('#sInfo'), sFoot = $('#sFoot'), sRestore = $('#sRestore'), sDelete = $('#sDelete'),
+  sDay = $('#sDay'), sDayText = $('#sDayText'), sDayInput = $('#sDayInput');
 
 const rectOf = el => {
   const r = el.getBoundingClientRect();
@@ -604,7 +724,7 @@ const Editor = {
     this.task = task;
     this.draft = task
       ? { ...task, reminders: [...(task.reminders || [])] }
-      : { id: uid(), title: '', deadline: null, startedAt: null, reminders: [], createdAt: now(), doneAt: null };
+      : { id: uid(), title: '', deadline: null, startedAt: null, startAuto: false, reminders: [], createdAt: now(), doneAt: null, day: view.day, tag: null };
     this.origin = originEl;
     this.fill();
     this.layout();
@@ -624,6 +744,7 @@ const Editor = {
     const d = this.draft;
     sTitle.value = d.title || '';
     const isDone = !!d.doneAt;
+    this.renderDay();
     this.renderDeadline();
     sRem.hidden = isDone || !d.deadline;
     this.renderChips();
@@ -638,6 +759,20 @@ const Editor = {
     } else sInfo.innerHTML = '';
     sFoot.hidden = this.isNew;
     sRestore.hidden = !isDone;
+  },
+
+  /* строка «День» — только у задач, запланированных на будущий день */
+  renderDay() {
+    const d = this.draft, on = !d.doneAt && isPlanned(d);
+    if (on) { sDayText.innerHTML = `${fmtDay(d.day)}<span>${NB}·${NB}${fmtIn(d.day)}</span>`; sDayInput.value = d.day; sDayInput.min = todayKey; }
+    sDay.hidden = !on;
+  },
+
+  setDay(k) {
+    const d = this.draft;
+    d.day = k && k > todayKey ? k : null;
+    if (d.day) Start.cancel(d); // задача на будущий день не бывает начатой
+    this.renderDay();
   },
 
   renderDeadline() {
@@ -671,12 +806,13 @@ const Editor = {
   },
 
   setDeadline(ts) {
-    const d = this.draft;
+    const d = this.draft, had = !!d.deadline;
     if (ts && !isNaN(ts)) {
-      if (!d.deadline && !d.startedAt) d.startedAt = now(); // начало = момент первого выставления срока (если задачу не начали вручную)
       d.deadline = ts;
+      Start.onDeadlineSet(d, had);
     } else {
-      d.deadline = null; d.startedAt = null; d.reminders = [];
+      d.deadline = null; d.reminders = [];
+      Start.onDeadlineCleared(d);
     }
     this.renderDeadline();
     const showRem = !d.doneAt && !!d.deadline;
@@ -717,16 +853,18 @@ const Editor = {
         d.title = title;
         store.queue.push(d);
         renderQueue(); save();
-        const row = rowMap.get(d.id), card = $('.card', row);
-        card.style.visibility = 'hidden';
-        queueScroll.scrollTop = queueScroll.scrollHeight;
-        target = card; reveal = card;
+        const row = rowMap.get(d.id), card = row && $('.card', row);
+        if (card) {
+          card.style.visibility = 'hidden';
+          queueScroll.scrollTop = queueScroll.scrollHeight;
+          target = card; reveal = card;
+        }
       } else target = $('#fab');
     } else {
       d.title = title || this.task.title;
       Object.assign(this.task, d);
       if (this.task.doneAt) { renderDone(); const r = doneEl.querySelector(`[data-id="${d.id}"] .card`); target = r; if (r) { r.style.visibility = 'hidden'; reveal = r; } }
-      else { renderQueue(); const row = rowMap.get(d.id); target = row && $('.card', row); reveal = target; }
+      else { renderQueue(); const row = rowMap.get(d.id); target = row && $('.card', row); reveal = target || null; }
       if (this.origin && this.origin !== target) this.origin.style.visibility = '';
       save();
     }
@@ -778,6 +916,7 @@ const Editor = {
     this.closing = true;
     const t = this.task, title = sTitle.value.trim();
     Object.assign(t, this.draft, { title: title || t.title, doneAt: null });
+    if (!isPlanned(t)) t.day = null;
     store.done = store.done.filter(x => x.id !== t.id);
     store.queue.push(t);
     const origin = this.origin;
@@ -825,11 +964,203 @@ sChips.addEventListener('click', e => {
   const done = () => Editor.renderChips();
   if (REDUCED) done(); else c.animate([{ transform: 'none', opacity: 1 }, { transform: 'scale(.6)', opacity: 0 }], { duration: 160, easing: 'ease-in' }).finished.then(done);
 });
+sDayInput.addEventListener('change', () => { if (Editor.draft && !Editor.closing && sDayInput.value) Editor.setDay(sDayInput.value); });
 sDelete.addEventListener('click', () => Editor.remove());
 sRestore.addEventListener('click', () => Editor.restore());
 scrim.addEventListener('click', () => { if (now() - Editor.openedAt > 350) Editor.close(); });
-$('#fab').addEventListener('click', e => { if (!ui.busy && !Editor.open) Editor.show(null, e.currentTarget); });
+fab.addEventListener('click', e => { if (!ui.busy && !Editor.open && !Menu.open) Editor.show(null, e.currentTarget); });
 addEventListener('resize', () => { if (Editor.open && !Editor.closing) Editor.layout(); });
+
+/* ───────────────────────── меню задачи (удержание карточки) ───────────────────────── */
+const TAG_COLORS = ['#E5484D', '#F76B15', '#E0A100', '#30A46C', '#12A594', '#0090FF', '#6E56CF', '#D6409F', '#8B8D98'];
+const menuEl = $('#menu'), mScrim = $('#mScrim'), miStart = $('#miStart'), miDate = $('#miDate'),
+  mTags = $('#mTags'), mEdit = $('#mTagEdit'), teName = $('#teName'), teColors = $('#teColors'),
+  teOk = $('#teOk'), teDel = $('#teDel');
+teColors.innerHTML = TAG_COLORS.map(c => `<button class="te-c" data-c="${c}" style="--c:${c}" aria-label="Цвет"></button>`).join('');
+
+const Menu = {
+  open: false, held: false, row: null, task: null, clone: null, card: null, edit: null, color: TAG_COLORS[0],
+
+  openFor(row) {
+    const t = store.queue.find(x => x.id === row.dataset.id);
+    if (!t) return;
+    this.open = true; this.held = true; this.row = row; this.task = t; this.edit = null;
+    haptic();
+    const card = this.card = $('.card', row), r = card.getBoundingClientRect();
+    const clone = this.clone = card.cloneNode(true);
+    clone.classList.add('lifted');
+    Object.assign(clone.style, { left: r.left + 'px', top: r.top + 'px', width: r.width + 'px', height: r.height + 'px' });
+    document.body.appendChild(clone);
+    card.style.visibility = 'hidden';
+    this.render();
+    mScrim.hidden = false; menuEl.hidden = false;
+    this.place(r);
+    clone.animate([{ transform: 'scale(1)' }, { transform: 'scale(1.03)' }], { duration: dur(260), easing: EASE, fill: 'forwards' });
+    mScrim.animate([{ opacity: 0 }, { opacity: 1 }], { duration: dur(240) });
+    menuEl.animate([{ opacity: 0, transform: 'scale(.86)' }, { opacity: 1, transform: 'none' }], { duration: dur(320), easing: 'cubic-bezier(.2,1.1,.35,1)' });
+  },
+
+  /* под карточкой, если хватает места, иначе над ней */
+  place(r) {
+    const mh = menuEl.offsetHeight, mw = menuEl.offsetWidth, vw = document.documentElement.clientWidth;
+    const top0 = (parseFloat(getComputedStyle($('.head')).paddingTop) || 14) - 6;
+    const bottomLim = innerHeight - 16;
+    let top = r.bottom + 12, origin = 'top';
+    if (top + mh > bottomLim) { top = r.top - 12 - mh; origin = 'bottom'; }
+    top = clamp(top, top0, bottomLim - mh);
+    menuEl.style.top = top + 'px';
+    menuEl.style.left = clamp(r.left + 8, 16, vw - mw - 16) + 'px';
+    menuEl.style.transformOrigin = `${origin} left`;
+  },
+
+  render() {
+    const t = this.task;
+    miStart.innerHTML = t.startedAt
+      ? `${ICON.stop}<span class="mi-t">Отменить начало</span><span class="mi-s">${fmtDT(t.startedAt)}</span>`
+      : `${ICON.play}<span class="mi-t">Начать</span>${isPlanned(t) ? `<span class="mi-s">сегодня</span>` : ''}`;
+    $('#miDateS').textContent = isPlanned(t) ? fmtDay(t.day).replace(/^[^,]+, /, '') : 'сегодня';
+    miDate.value = t.day || todayKey; miDate.min = todayKey;
+    let h = '';
+    for (const g of store.tags) h += `<button class="tchip${t.tag === g.id ? ' on' : ''}" data-id="${g.id}" style="--tc:${g.color}">${esc(g.name)}</button>`;
+    h += `<button class="tchip add" id="tAdd" aria-label="Новый тег">${ICON.plus}</button>`;
+    mTags.innerHTML = h;
+    mTags.hidden = false; mEdit.hidden = true;
+  },
+
+  /* палец отпущен — меню остаётся для выбора */
+  release() { this.held = false; },
+
+  /* палец повёл карточку — меню убирается, начинается перетаскивание */
+  toDrag() {
+    const card = this.card;
+    this.teardown();
+    if (card) card.style.visibility = '';
+  },
+
+  teardown() {
+    this.clone && this.clone.remove();
+    mScrim.hidden = true; menuEl.hidden = true;
+    for (const el of [menuEl, mScrim]) el.getAnimations().forEach(a => a.cancel());
+    this.open = false; this.held = false; this.clone = null; this.edit = null;
+  },
+
+  async close() {
+    if (!this.open || this.closing) return;
+    this.closing = true;
+    if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+    const t = this.task, row = this.row, card = this.card, clone = this.clone;
+    if (row && t && inView(t)) { fillRow(row, t); if (clone) $('.c-meta', clone).innerHTML = $('.c-meta', card).innerHTML; }
+    const gone = !t || !inView(t);
+    menuEl.animate([{ opacity: 1 }, { opacity: 0, transform: 'scale(.92)' }], { duration: dur(160), easing: 'ease-in', fill: 'forwards' });
+    mScrim.animate([{ opacity: 1 }, { opacity: 0 }], { duration: dur(220), fill: 'forwards' });
+    if (clone) {
+      const cr = card.getBoundingClientRect();
+      await clone.animate([{ transform: 'scale(1.03)', top: clone.style.top, opacity: 1 },
+        { transform: gone ? 'scale(.94)' : 'scale(1)', top: cr.top + 'px', opacity: gone ? 0 : 1 }],
+        { duration: dur(240), easing: EASE, fill: 'forwards' }).finished;
+    } else await wait(dur(200));
+    this.teardown();
+    this.closing = false;
+    if (gone && row) { await collapse(row); renderQueue(); }
+    else if (card) card.style.visibility = '';
+  },
+
+  apply(fn, closeAfter = 0) {
+    fn(this.task);
+    save();
+    if (inView(this.task)) renderQueue(); // если задача уходит из списка — схлопнется при закрытии
+    if (this.clone && inView(this.task)) $('.c-meta', this.clone).innerHTML = metaHTML(this.task);
+    if (closeAfter >= 0) setTimeout(() => this.close(), closeAfter);
+  },
+
+  /* ── теги ── */
+  openEditor(g) {
+    this.edit = g || 'new';
+    teName.value = g ? g.name : '';
+    this.color = g ? g.color : (TAG_COLORS.find(c => !store.tags.some(x => x.color === c)) || TAG_COLORS[0]);
+    this.paintColor();
+    teDel.hidden = !g;
+    mTags.hidden = true; mEdit.hidden = false;
+    teName.focus({ preventScroll: true });
+    // клавиатура закроет низ экрана — меню поднимается наверх
+    const top0 = (parseFloat(getComputedStyle($('.head')).paddingTop) || 14);
+    menuEl.animate([{ top: menuEl.style.top }, { top: top0 + 'px' }], { duration: dur(280), easing: EASE });
+    menuEl.style.top = top0 + 'px';
+  },
+  paintColor() {
+    teColors.querySelectorAll('.te-c').forEach(b => b.classList.toggle('on', b.dataset.c === this.color));
+    teName.style.setProperty('--tc', this.color);
+  },
+  commitTag() {
+    const name = teName.value.trim().replace(/\s+/g, ' ');
+    if (!this.edit) return false;
+    const g = this.edit === 'new' ? null : this.edit;
+    this.edit = null;
+    if (!name) { this.render(); return false; }
+    if (g) { g.name = name; g.color = this.color; save(); renderQueue(); this.render(); return false; }
+    const tg = { id: uid(), name, color: this.color };
+    store.tags.push(tg);
+    this.task.tag = tg.id;
+    save(); renderQueue();
+    if (this.clone) $('.c-meta', this.clone).innerHTML = metaHTML(this.task);
+    this.render();
+    return true;
+  },
+};
+
+miStart.addEventListener('click', () => Menu.apply(t => (t.startedAt ? Start.cancel(t) : Start.begin(t)), 160));
+miDate.addEventListener('change', () => {
+  const v = miDate.value; if (!v || !Menu.open) return;
+  miDate.blur();
+  Menu.apply(t => {
+    const k = v > todayKey ? v : null;
+    if (k === t.day || (!k && !isPlanned(t))) return;
+    t.day = k;
+    if (k) Start.cancel(t); // задача на будущий день не бывает начатой
+  }, 120);
+  haptic();
+});
+/* тег: нажатие — поставить/снять; удержание — изменить или удалить */
+(() => {
+  let lp = 0, longed = false;
+  mTags.addEventListener('pointerdown', e => {
+    const c = e.target.closest('.tchip:not(.add)'); longed = false; clearTimeout(lp);
+    if (c) lp = setTimeout(() => { longed = true; haptic(); Menu.openEditor(store.tags.find(g => g.id === c.dataset.id)); }, 480);
+  });
+  for (const ev of ['pointerup', 'pointercancel', 'pointerleave']) mTags.addEventListener(ev, () => clearTimeout(lp));
+  mTags.addEventListener('contextmenu', e => e.preventDefault());
+  mTags.addEventListener('click', e => {
+    if (longed) { longed = false; return; }
+    const c = e.target.closest('.tchip'); if (!c) return;
+    if (c.classList.contains('add')) { Menu.openEditor(null); return; }
+    const id = c.dataset.id;
+    mTags.querySelectorAll('.tchip').forEach(x => x.classList.toggle('on', x === c && Menu.task.tag !== id));
+    Menu.apply(t => { t.tag = t.tag === id ? null : id; }, 220);
+  });
+})();
+teColors.addEventListener('click', e => {
+  const b = e.target.closest('.te-c'); if (!b) return;
+  e.preventDefault();
+  Menu.color = b.dataset.c; Menu.paintColor();
+});
+teColors.addEventListener('pointerdown', e => e.preventDefault()); // не убирать клавиатуру
+teName.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); if (Menu.commitTag()) setTimeout(() => Menu.close(), 200); } });
+teOk.addEventListener('pointerdown', e => e.preventDefault());
+teOk.addEventListener('click', () => { if (Menu.commitTag()) setTimeout(() => Menu.close(), 200); });
+teDel.addEventListener('pointerdown', e => e.preventDefault());
+teDel.addEventListener('click', () => {
+  const g = Menu.edit; if (!g || g === 'new') return;
+  store.tags = store.tags.filter(x => x !== g);
+  for (const t of [...store.queue, ...store.done]) if (t.tag === g.id) t.tag = null;
+  Menu.edit = null; save(); renderQueue();
+  if (Menu.clone) $('.c-meta', Menu.clone).innerHTML = metaHTML(Menu.task);
+  Menu.render();
+});
+mScrim.addEventListener('click', () => {
+  if (Menu.held) return;
+  if (Menu.edit) Menu.commitTag();
+  Menu.close();
+});
 
 /* ───────────────────────── notifications ───────────────────────── */
 /*
@@ -861,6 +1192,7 @@ function fetchT(url, opts = {}, ms = 6000) {
   return fetch(url, { ...opts, signal: c.signal }).finally(() => clearTimeout(t));
 }
 const canPush = () => !!SERVER && 'PushManager' in window && !!window.Notification;
+const api = op => SERVER + (SERVER.includes('?') ? '&' : '?') + 'op=' + op;
 
 const Notify = {
   reg: null, key: null, sub: null, timers: [], t: 0, active: false,
@@ -877,7 +1209,7 @@ const Notify = {
   async connect() {
     if (!this.key) {
       try {
-        const r = await fetchT(SERVER + '/api/key', { cache: 'no-store' });
+        const r = await fetchT(api('key'), { cache: 'no-store' });
         if (r.ok) { const j = await r.json(); if (j && j.key) this.key = j.key; }
       } catch (_) {}
     }
@@ -942,8 +1274,8 @@ const Notify = {
       if (!this.sub) await this.connect();
       if (this.sub) {
         try {
-          const r = await fetchT(SERVER + '/api/sync', {
-            method: 'POST', headers: { 'content-type': 'application/json' },
+          const r = await fetchT(api('sync'), {
+            method: 'POST', headers: { 'content-type': 'text/plain;charset=UTF-8' },
             body: JSON.stringify({ subscription: this.sub.toJSON(), items }),
           });
           ok = r.ok;
@@ -1040,20 +1372,43 @@ bindPress(toast, {
 });
 
 /* ───────────────────────── calendars ───────────────────────── */
-const calMain = new Calendar($('#calMain'), { mark: k => (k === todayKey ? ' today' : '') });
-
-// двойное нажатие — вернуться к текущему месяцу
+/* Главный: сегодня — в кольце; выбранный будущий день — залит; точка — на дне уже есть задачи.
+   Нажатие на будущий день — план на этот день; на сегодня — обратно к очереди;
+   двойное нажатие — к текущему месяцу и сегодняшнему дню. */
+const calMain = new Calendar($('#calMain'), {
+  keys: () => [todayKey, view.day, ...plannedDays].filter(Boolean),
+  mark(k) {
+    let c = k === todayKey ? ' today' : '';
+    if (k === view.day) c += ' sel';
+    if (plannedDays.has(k)) c += ' dot';
+    return c;
+  },
+});
 (() => {
   let last = 0, lx = 0, ly = 0;
   $('#calMain').addEventListener('click', e => {
     const t = now();
     if (t - last < 320 && Math.hypot(e.clientX - lx, e.clientY - ly) < 40) {
-      calMain.goto(monthIdx(new Date()), true); last = 0;
-    } else { last = t; lx = e.clientX; ly = e.clientY; }
+      last = 0; selectDay(null); calMain.home(false); haptic(); return;
+    }
+    last = t; lx = e.clientX; ly = e.clientY;
+    const d = e.target.closest('.d'); if (!d) return;
+    const k = d.dataset.k;
+    if (k < todayKey) {
+      if (!REDUCED) d.animate([{ transform: 'none' }, { transform: 'translateX(-2px)' }, { transform: 'translateX(2px)' }, { transform: 'none' }], { duration: 200 });
+      return;
+    }
+    if ((k === todayKey ? null : k) !== view.day) { haptic(); selectDay(k); }
   });
 })();
 
+function* rangeKeys() {
+  if (range.pending) { yield range.pending; return; }
+  const d = fromKey(range.start), e = fromKey(range.end);
+  for (let i = 0; d <= e && i < 3700; i++) { yield keyOf(d); d.setDate(d.getDate() + 1); }
+}
 const calDone = new Calendar($('#calDone'), {
+  keys: () => [todayKey, ...rangeKeys()],
   mark(k) {
     let c = k === todayKey ? ' today' : '';
     if (range.pending) { if (k === range.pending) c += ' pend'; return c; }
@@ -1078,7 +1433,7 @@ const calDone = new Calendar($('#calDone'), {
       el.classList.remove('holding');
       suppress = true; setTimeout(() => (suppress = false), 600);
       resetRange();
-      calDone.refresh(); calDone.goto(monthIdx(new Date()), true);
+      calDone.refresh(); calDone.home(false);
       el.classList.remove('pulse'); void el.offsetWidth; el.classList.add('pulse');
       haptic();
       renderDone(true);
@@ -1114,9 +1469,12 @@ function tick() {
   const k = keyOf(new Date());
   if (k !== todayKey) {
     todayKey = k;
-    renderToday(); calMain.refresh(); calDone.refresh();
+    if (promote()) save();
+    if (view.day && view.day <= todayKey) { view.day = null; renderPlanBar(false); }
+    renderToday(); renderQueue(); calMain.refresh(); calDone.refresh();
     if (tab === 'done') renderDone();
   }
+  if (view.day) renderPlanBar(false);
   for (const t of store.queue) { const row = rowMap.get(t.id); if (row) fillRow(row, t); }
   if (Editor.open && Editor.draft && Editor.draft.deadline && !Editor.closing) {
     const left = Editor.draft.deadline - now();
@@ -1131,8 +1489,28 @@ document.addEventListener('visibilitychange', () => {
 addEventListener('pagehide', () => seen.mark());
 addEventListener('online', () => Notify.schedule());
 
+/* ───────────────────────── iOS: «съеденный» низ экрана ───────────────────────── */
+/* Баг WebKit в приложениях с экрана «Домой»: после первой клавиатуры высота окна
+   уменьшается (~60 px) и не восстанавливается — нижняя панель «всплывает».
+   Лечится принудительным пересчётом раскладки после закрытия клавиатуры. */
+let maxH = innerHeight;
+const isField = el => !!el && (el.tagName === 'TEXTAREA' || (el.tagName === 'INPUT' && !/^(checkbox|date|datetime-local)$/.test(el.type)));
+addEventListener('resize', () => { if (!isField(document.activeElement)) maxH = Math.max(maxH, innerHeight); });
+function healViewport() {
+  if (innerHeight >= maxH - 4 || isField(document.activeElement)) return;
+  const keep = [queueScroll, $('#doneScroll'), calMain.vp, calDone.vp].map(el => [el, el.scrollTop]);
+  appEl.style.display = 'none';
+  void appEl.offsetHeight;
+  appEl.style.display = '';
+  keep.forEach(([el, v]) => { el.scrollTop = v; });
+  maxH = Math.max(maxH, innerHeight);
+}
+document.addEventListener('focusout', () => setTimeout(healViewport, 160));
+document.addEventListener('visibilitychange', () => { if (!document.hidden) setTimeout(healViewport, 60); });
+
 /* ───────────────────────── boot ───────────────────────── */
 load();
+if (promote()) { try { localStorage.setItem(KEY, JSON.stringify(store)); } catch (_) {} }
 resetRange();
 renderToday();
 renderQueue();
